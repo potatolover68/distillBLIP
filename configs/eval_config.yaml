@@ -1,0 +1,32 @@
+# Configuration for evaluating distilled BLIP models
+
+# Data configuration
+data:
+  image_dir: "data/coco/val2017"
+  annotations: "data/coco/annotations/captions_val2017.json"
+  max_length: 30
+  num_workers: 4
+
+# Generation configuration
+max_length: 30
+num_beams: 4
+min_length: 5
+temperature: 1.0
+top_p: 0.9
+repetition_penalty: 1.0
+length_penalty: 1.0
+no_repeat_ngram_size: 3
+
+# Evaluation metrics
+use_cider: true
+use_bleu: true
+use_meteor: true
+use_rouge: true
+use_spice: false  # SPICE is computationally expensive
+
+# Performance benchmarking
+benchmark:
+  batch_sizes: [1, 4, 8, 16]  # Batch sizes to test for throughput
+  warmup_runs: 5
+  num_runs: 50
+  test_on_cpu: false

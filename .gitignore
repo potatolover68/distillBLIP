@@ -1,0 +1,107 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyTorch
+*.pth
+*.pt
+*.bin
+*.onnx
+*.safetensors
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+data/coco/
+data/flickr30k/
+data/conceptual_captions/
+checkpoints/
+logs/
+evaluation_results/
+wandb/
+
+# Large media files
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.tif
+*.tiff
+*.mp4
+*.avi
+*.mov
+*.zip
+*.tar
+*.gz
+
+# Exceptions - keep sample images
+!examples/*.jpg
+!examples/*.jpeg
+!examples/*.png
+
+# Hugging Face cache
+.cache/
+.huggingface/
+
+# TensorBoard logs
+runs/
+events.out.tfevents.*
+
+# LaTeX
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.dvi
+
+# Misc
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+.hypothesis/
+.coverage.*
+coverage.xml
+*.cover

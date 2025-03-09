@@ -39,22 +39,69 @@ def parse_args():
 
 
 def download_file(url, filename, chunk_size=1024):
-    """Download a file with progress bar."""
-    response = requests.get(url, stream=True)
-    total_size = int(response.headers.get('content-length', 0))
+    """
+    Download a file with progress bar and resume capability.
     
-    with open(filename, 'wb') as f, tqdm(
-            desc=os.path.basename(filename),
-            total=total_size,
-            unit='B',
-            unit_scale=True,
-            unit_divisor=1024,
-    ) as bar:
-        for data in response.iter_content(chunk_size=chunk_size):
-            size = f.write(data)
-            bar.update(size)
-            
-    return filename
+    Args:
+        url: URL to download from
+        filename: Local filename to save to
+        chunk_size: Size of chunks to download
+        
+    Returns:
+        Path to the downloaded file
+    """
+    # Check if file exists and get its size
+    file_size = 0
+    if os.path.exists(filename):
+        file_size = os.path.getsize(filename)
+        print(f"File {os.path.basename(filename)} exists, size: {file_size / (1024*1024):.2f} MB")
+    
+    # Set up headers for resuming download
+    headers = {}
+    if file_size > 0:
+        headers['Range'] = f'bytes={file_size}-'
+        print(f"Resuming download from byte {file_size}")
+    
+    # Make request with headers
+    try:
+        response = requests.get(url, stream=True, headers=headers)
+        
+        # Check if the server supports resuming
+        if file_size > 0 and response.status_code == 200:
+            # Server doesn't support resume, start from beginning
+            print("Server doesn't support resuming downloads. Starting from beginning.")
+            file_size = 0
+            response = requests.get(url, stream=True)
+        
+        # Get total size
+        total_size = int(response.headers.get('content-length', 0))
+        
+        # If resuming, add the existing file size to get the total
+        if file_size > 0 and response.status_code == 206:  # Partial Content
+            total_size += file_size
+            print(f"Total file size: {total_size / (1024*1024):.2f} MB")
+        
+        # Open file in append mode if resuming, otherwise write mode
+        mode = 'ab' if file_size > 0 and response.status_code == 206 else 'wb'
+        
+        with open(filename, mode) as f, tqdm(
+                desc=os.path.basename(filename),
+                initial=file_size,
+                total=total_size,
+                unit='B',
+                unit_scale=True,
+                unit_divisor=1024,
+        ) as bar:
+            for data in response.iter_content(chunk_size=chunk_size):
+                size = f.write(data)
+                bar.update(size)
+                
+        return filename
+    except requests.exceptions.RequestException as e:
+        print(f"Error downloading file: {e}")
+        if os.path.exists(filename) and file_size > 0:
+            print(f"You can try resuming the download later.")
+        raise
 
 
 def extract_zip(zip_path, extract_path):
@@ -72,7 +119,7 @@ def extract_zip(zip_path, extract_path):
     
 
 def download_coco(data_dir, skip_if_exists=False):
-    """Download COCO 2017 dataset."""
+    """Download COCO 2017 dataset using DatasetNinja for faster downloads."""
     coco_dir = os.path.join(data_dir, "coco")
     os.makedirs(coco_dir, exist_ok=True)
     
@@ -94,11 +141,11 @@ def download_coco(data_dir, skip_if_exists=False):
         print("COCO dataset seems to be already downloaded and extracted. Skipping download.")
         return
     
-    # Download URLs
+    # DatasetNinja download URLs (faster than the official ones)
     urls = {
-        "train_images": "http://images.cocodataset.org/zips/train2017.zip",
-        "val_images": "http://images.cocodataset.org/zips/val2017.zip",
-        "annotations": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+        "train_images": "https://datasetninja.com/get-download-link?id=5f0cbcd7-f497-4578-a627-a2fbc5c0a153",
+        "val_images": "https://datasetninja.com/get-download-link?id=8c5e1f2c-5cbc-4f41-8c64-1a8ed0293971",
+        "annotations": "https://datasetninja.com/get-download-link?id=7fcb7fc7-3b94-4a06-adb2-731d1ad3c067"
     }
     
     downloads_dir = os.path.join(coco_dir, "downloads")
@@ -107,9 +154,52 @@ def download_coco(data_dir, skip_if_exists=False):
     # Download files
     download_paths = {}
     for name, url in urls.items():
-        print(f"Downloading {name} from {url}")
-        filename = os.path.join(downloads_dir, os.path.basename(url))
-        download_paths[name] = download_file(url, filename)
+        print(f"Getting download link for {name} from DatasetNinja...")
+        # Get the actual download link from DatasetNinja
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                download_url = response.json().get("url")
+                if download_url:
+                    print(f"Downloading {name} from {download_url}")
+                    filename = os.path.join(downloads_dir, os.path.basename(download_url.split("?")[0]))
+                    download_paths[name] = download_file(download_url, filename)
+                else:
+                    print(f"Failed to get download URL for {name}. Falling back to official source.")
+                    # Fallback to official URLs
+                    fallback_urls = {
+                        "train_images": "http://images.cocodataset.org/zips/train2017.zip",
+                        "val_images": "http://images.cocodataset.org/zips/val2017.zip",
+                        "annotations": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+                    }
+                    fallback_url = fallback_urls.get(name)
+                    print(f"Downloading {name} from {fallback_url}")
+                    filename = os.path.join(downloads_dir, os.path.basename(fallback_url))
+                    download_paths[name] = download_file(fallback_url, filename)
+            else:
+                print(f"Failed to get download link for {name}. Falling back to official source.")
+                # Fallback to official URLs
+                fallback_urls = {
+                    "train_images": "http://images.cocodataset.org/zips/train2017.zip",
+                    "val_images": "http://images.cocodataset.org/zips/val2017.zip",
+                    "annotations": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+                }
+                fallback_url = fallback_urls.get(name)
+                print(f"Downloading {name} from {fallback_url}")
+                filename = os.path.join(downloads_dir, os.path.basename(fallback_url))
+                download_paths[name] = download_file(fallback_url, filename)
+        except Exception as e:
+            print(f"Error getting download link: {e}. Falling back to official source.")
+            # Fallback to official URLs
+            fallback_urls = {
+                "train_images": "http://images.cocodataset.org/zips/train2017.zip",
+                "val_images": "http://images.cocodataset.org/zips/val2017.zip",
+                "annotations": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+            }
+            fallback_url = fallback_urls.get(name)
+            print(f"Downloading {name} from {fallback_url}")
+            filename = os.path.join(downloads_dir, os.path.basename(fallback_url))
+            download_paths[name] = download_file(fallback_url, filename)
     
     # Extract files
     for name, path in download_paths.items():

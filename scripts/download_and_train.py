@@ -368,6 +368,9 @@ def run_training(args, config_path):
         print(f"Training script not found at {train_script}")
         return False
     
+    # Get the project root directory
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
     # Prepare command
     cmd = [
         sys.executable, train_script,
@@ -378,13 +381,25 @@ def run_training(args, config_path):
         "--num_epochs", str(args.num_epochs)
     ]
     
+    # Set environment variables to ensure Python can find the modules
+    env = os.environ.copy()
+    
+    # Add the project root to PYTHONPATH
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{project_root}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = project_root
+    
+    print(f"Setting PYTHONPATH to include project root: {project_root}")
+    
     # Run the training process
     process = subprocess.Popen(
         cmd, 
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
-        bufsize=1
+        bufsize=1,
+        env=env  # Use the modified environment
     )
     
     # Stream the output
@@ -430,6 +445,9 @@ def run_evaluation(args, best_model_path=None):
         print(f"Evaluation script not found at {eval_script}")
         return False
     
+    # Get the project root directory
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
     # Prepare command
     results_dir = os.path.join("evaluation_results", f"eval_{time.strftime('%Y%m%d_%H%M%S')}")
     os.makedirs(results_dir, exist_ok=True)
@@ -443,13 +461,25 @@ def run_evaluation(args, best_model_path=None):
         "--compare_with_teacher"
     ]
     
+    # Set environment variables to ensure Python can find the modules
+    env = os.environ.copy()
+    
+    # Add the project root to PYTHONPATH
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = f"{project_root}{os.pathsep}{env['PYTHONPATH']}"
+    else:
+        env['PYTHONPATH'] = project_root
+    
+    print(f"Setting PYTHONPATH to include project root: {project_root}")
+    
     # Run the evaluation process
     process = subprocess.Popen(
         cmd, 
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         universal_newlines=True,
-        bufsize=1
+        bufsize=1,
+        env=env  # Use the modified environment
     )
     
     # Stream the output

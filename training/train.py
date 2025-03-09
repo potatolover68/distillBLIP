@@ -1,9 +1,14 @@
 import os
+import sys
 import argparse
 import yaml
 import torch
 from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
+
+# Add the project root directory to the Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, project_root)
 
 from models.teacher_model import BLIPTeacherModel
 from models.student_model import DistilledBLIPForConditionalGeneration, DistilledBLIPConfig

@@ -1,0 +1,37 @@
+cross_attention_dim: 768
+data:
+  batch_size: 32
+  max_length: 30
+  num_workers: 4
+  train_annotations: data\coco\subset\annotations\captions_train2017.json
+  train_image_dir: data\coco\subset\train2017
+  val_annotations: data\coco\subset\annotations\captions_val2017.json
+  val_image_dir: data\coco\subset\val2017
+distillation:
+  alpha: 0.5
+  lambda_attn: 0.5
+  lambda_feature: 0.5
+  lambda_logits: 1.0
+  temperature: 2.0
+  use_attn_distillation: true
+  use_feature_distillation: true
+intermediate_size: 2048
+num_attention_heads: 8
+num_text_decoder_layers: 6
+num_text_encoder_layers: 6
+num_visual_encoder_layers: 6
+text_hidden_size: 768
+text_model_name: bert-base-uncased
+training:
+  beta1: 0.9
+  beta2: 0.999
+  eval_every: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 5e-5
+  max_grad_norm: 1.0
+  mixed_precision: true
+  save_every: 1
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+vision_hidden_size: 768
+vision_model_name: google/vit-base-patch16-224-in21k

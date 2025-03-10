@@ -77,77 +77,54 @@ def set_seed(seed):
 
 
 def main():
-    # Parse arguments
+    """Main function to train a distilled BLIP model."""
     args = parse_args()
+    config_path = args.config
+    config = load_config(config_path)
     
-    # Set random seed
-    set_seed(args.seed)
-    
-    # Load configuration
-    if not os.path.exists(args.config):
-        raise FileNotFoundError(f"Config file not found: {args.config}")
-    
-    config = load_config(args.config)
+    # Set random seed for reproducibility
+    set_seed(42)
     
     # Create output directories
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     
-    # Set device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-    
     # Load teacher model
     print(f"Loading teacher model: {args.teacher_model}")
     teacher_model = BLIPTeacherModel(model_path=args.teacher_model)
     
-    # Initialize student model
-    student_config = DistilledBLIPConfig(
-        vision_model_name=config.get("vision_model_name", "google/vit-base-patch16-224-in21k"),
-        text_model_name=config.get("text_model_name", "bert-base-uncased"),
-        vision_hidden_size=config.get("vision_hidden_size", 768),
-        text_hidden_size=config.get("text_hidden_size", 768),
-        cross_attention_dim=config.get("cross_attention_dim", 768),
-        num_visual_encoder_layers=config.get("num_visual_encoder_layers", 6),
-        num_text_encoder_layers=config.get("num_text_encoder_layers", 6),
-        num_text_decoder_layers=config.get("num_text_decoder_layers", 6),
-        num_attention_heads=config.get("num_attention_heads", 8),
-        intermediate_size=config.get("intermediate_size", 2048),
+    # Create student model
+    print("Creating student model...")
+    student_config = config.get("model", {})
+    student_model = DistilledBLIPForConditionalGeneration(
+        DistilledBLIPConfig(**student_config)
     )
     
-    print("Initializing student model...")
-    student_model = DistilledBLIPForConditionalGeneration(student_config)
-    
-    # Create data loaders
-    print("Creating data loaders...")
+    # Load data
+    print("Loading data...")
     data_config = config.get("data", {})
     
     train_dataloader = get_captioning_dataloader(
-        image_dir=data_config.get("train_image_dir", "data/coco/train2017"),
-        annotations_file=data_config.get("train_annotations", "data/coco/annotations/captions_train2017.json"),
-        processor=teacher_model.processor,
-        batch_size=data_config.get("batch_size", 32),
-        max_length=data_config.get("max_length", 30),
+        dataset_name=data_config.get("dataset", "coco"),
         split="train",
-        shuffle=True,
+        batch_size=data_config.get("batch_size", 32),
+        image_size=data_config.get("image_size", 384),
+        max_length=data_config.get("max_length", 30),
+        subset_size=data_config.get("subset_size", None),
         num_workers=data_config.get("num_workers", 4),
     )
     
-    if data_config.get("val_image_dir") and data_config.get("val_annotations"):
-        val_dataloader = get_captioning_dataloader(
-            image_dir=data_config.get("val_image_dir", "data/coco/val2017"),
-            annotations_file=data_config.get("val_annotations", "data/coco/annotations/captions_val2017.json"),
-            processor=teacher_model.processor,
-            batch_size=data_config.get("batch_size", 32),
-            max_length=data_config.get("max_length", 30),
-            split="val",
-            shuffle=False,
-            num_workers=data_config.get("num_workers", 4),
-        )
-    else:
-        val_dataloader = None
+    val_dataloader = get_captioning_dataloader(
+        dataset_name=data_config.get("dataset", "coco"),
+        split="validation",
+        batch_size=data_config.get("batch_size", 32),
+        image_size=data_config.get("image_size", 384),
+        max_length=data_config.get("max_length", 30),
+        subset_size=data_config.get("subset_size", None),
+        num_workers=data_config.get("num_workers", 4),
+    )
     
-    # Create loss function
+    # Set up distillation loss
     print("Setting up distillation loss...")
     distill_config = config.get("distillation", {})
     loss_fn = CombinedDistillationLoss(
@@ -163,25 +140,40 @@ def main():
     # Create optimizer
     print("Setting up optimizer...")
     training_config = config.get("training", {})
+    
+    # Ensure numeric values are properly converted to floats
+    learning_rate = float(training_config.get("learning_rate", 5e-5))
+    weight_decay = float(training_config.get("weight_decay", 0.01))
+    beta1 = float(training_config.get("beta1", 0.9))
+    beta2 = float(training_config.get("beta2", 0.999))
+    
+    # Get device from config, default to CUDA if available, otherwise CPU
+    device = training_config.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Move models to the appropriate device
+    teacher_model = teacher_model.to(device)
+    student_model = student_model.to(device)
+    
     optimizer = torch.optim.AdamW(
         student_model.parameters(),
-        lr=training_config.get("learning_rate", 5e-5),
-        weight_decay=training_config.get("weight_decay", 0.01),
-        betas=(training_config.get("beta1", 0.9), training_config.get("beta2", 0.999)),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        betas=(beta1, beta2) if "beta1" in training_config and "beta2" in training_config else (0.9, 0.999),
     )
     
     # Create learning rate scheduler
-    total_steps = len(train_dataloader) * args.num_epochs
-    warmup_steps = int(total_steps * training_config.get("warmup_ratio", 0.1))
+    total_steps = len(train_dataloader) * training_config.get("num_epochs", 10)
+    warmup_steps = training_config.get("warmup_steps", 0)
     
     lr_scheduler = get_linear_schedule_with_warmup(
-        optimizer=optimizer,
+        optimizer,
         num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
+        num_training_steps=total_steps
     )
     
     # Create trainer
-    print("Initializing trainer...")
+    print("Creating trainer...")
     trainer = DistillationTrainer(
         teacher_model=teacher_model,
         student_model=student_model,
@@ -190,7 +182,6 @@ def main():
         loss_fn=loss_fn,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
-        distill_config=distill_config,
         device=device,
         output_dir=args.output_dir,
         log_dir=args.log_dir,
@@ -199,20 +190,40 @@ def main():
         max_grad_norm=training_config.get("max_grad_norm", 1.0),
     )
     
-    # Resume from checkpoint if provided
-    if args.resume_from and os.path.exists(args.resume_from):
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    if args.resume_from:
         print(f"Resuming from checkpoint: {args.resume_from}")
         trainer.load_checkpoint(args.resume_from)
+        # Extract epoch number from checkpoint name if possible
+        try:
+            checkpoint_name = os.path.basename(args.resume_from)
+            if checkpoint_name.startswith("epoch_") and "_" in checkpoint_name:
+                epoch_str = checkpoint_name.split("_")[1]
+                if epoch_str.isdigit():
+                    start_epoch = int(epoch_str) + 1
+                    print(f"Resuming from epoch {start_epoch}")
+        except:
+            print("Could not determine starting epoch from checkpoint name. Starting from the beginning.")
     
     # Train the model
-    print(f"Starting training for {args.num_epochs} epochs...")
-    trainer.train(
-        num_epochs=args.num_epochs,
-        save_every=training_config.get("save_every", 1),
-        eval_every=training_config.get("eval_every", 1),
-    )
-    
-    print("Training completed!")
+    print("Starting training...")
+    try:
+        trainer.train(
+            num_epochs=training_config.get("num_epochs", 10),
+            save_every=training_config.get("save_steps", 1),
+            eval_every=training_config.get("eval_steps", 1),
+        )
+        print("Training completed successfully!")
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user. Saving checkpoint...")
+        trainer._save_checkpoint("manual_interrupt.pth")
+        print("Checkpoint saved. Exiting...")
+    except Exception as e:
+        print(f"Error during training: {e}")
+        # Save checkpoint on error
+        trainer._save_checkpoint("error_checkpoint.pth")
+        raise
 
 
 if __name__ == "__main__":

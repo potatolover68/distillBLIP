@@ -1,6 +1,8 @@
 import os
 import time
 import logging
+import warnings
+import signal
 from typing import Dict, List, Optional, Tuple, Union, Any
 
 import torch
@@ -10,10 +12,27 @@ from torch.utils.data import DataLoader
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from PIL import Image
 
 from models.teacher_model import BLIPTeacherModel
 from models.student_model import DistilledBLIPForConditionalGeneration, DistilledBLIPConfig
 from models.distillation import CombinedDistillationLoss
+
+# Filter out FutureWarnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, message=".*User provided device_type of 'cuda'.")
+
+# Global flag for graceful exit
+_GRACEFUL_EXIT = False
+
+def graceful_exit_handler(signum, frame):
+    """Signal handler for graceful exit."""
+    global _GRACEFUL_EXIT
+    print("\nReceived exit signal. Will save checkpoint and exit after current batch...")
+    _GRACEFUL_EXIT = True
+
+# Register signal handlers
+signal.signal(signal.SIGINT, graceful_exit_handler)
 
 
 class DistillationTrainer:
@@ -161,54 +180,72 @@ class DistillationTrainer:
             save_every (int): Save checkpoint every N epochs.
             eval_every (int): Evaluate on validation set every N epochs.
         """
-        if self.train_dataloader is None:
-            raise ValueError("Train dataloader is required for training.")
-        
         self.logger.info(f"Starting training for {num_epochs} epochs...")
+        self.logger.info(f"Device: {self.device}")
+        self.logger.info(f"Mixed precision: {self.mixed_precision}")
+        self.logger.info(f"Gradient accumulation steps: {self.gradient_accumulation_steps}")
         
-        for epoch in range(num_epochs):
-            self.epoch = epoch
-            self.logger.info(f"Epoch {epoch + 1}/{num_epochs}")
-            
-            # Training loop
-            train_metrics = self._train_epoch()
-            
-            # Log training metrics
-            for key, value in train_metrics.items():
-                self.writer.add_scalar(f"train/{key}", value, self.epoch)
-            
-            self.logger.info(f"Epoch {epoch + 1} - Train Loss: {train_metrics['loss']:.4f}")
-            
-            # Validation
-            if self.val_dataloader is not None and (epoch + 1) % eval_every == 0:
-                val_metrics = self._validate()
-                
-                # Log validation metrics
-                for key, value in val_metrics.items():
-                    self.writer.add_scalar(f"val/{key}", value, self.epoch)
-                
-                self.logger.info(f"Epoch {epoch + 1} - Val Loss: {val_metrics['loss']:.4f}")
-                
-                # Save best model
-                if val_metrics["loss"] < self.best_val_loss:
-                    self.best_val_loss = val_metrics["loss"]
-                    self._save_checkpoint(name="best_model.pth")
-                    self.logger.info(f"New best model saved with val loss: {self.best_val_loss:.4f}")
-            
-            # Save checkpoint
-            if (epoch + 1) % save_every == 0:
-                self._save_checkpoint(name=f"epoch_{epoch + 1}.pth")
-            
-            # Update learning rate
-            if self.lr_scheduler is not None:
-                self.lr_scheduler.step()
+        # Print keyboard interrupt instructions
+        print("\n" + "="*80)
+        print("Press Ctrl+C to gracefully exit training and save a checkpoint")
+        print("="*80 + "\n")
         
-        # Save final model
-        self._save_checkpoint(name="final_model.pth")
-        self.logger.info("Training completed!")
-        
-        # Close tensorboard writer
-        self.writer.close()
+        try:
+            for epoch in range(self.epoch, num_epochs):
+                self.epoch = epoch
+                self.logger.info(f"Starting epoch {epoch+1}/{num_epochs}")
+                
+                # Train for one epoch
+                train_metrics = self._train_epoch()
+                
+                # Log training metrics
+                self.logger.info(f"Epoch {epoch+1}/{num_epochs} - Training metrics:")
+                for k, v in train_metrics.items():
+                    self.logger.info(f"  {k}: {v:.4f}")
+                    self.writer.add_scalar(f"epoch/{k}", v, epoch)
+                
+                # Evaluate on validation set
+                if self.val_dataloader is not None and (epoch + 1) % eval_every == 0:
+                    self.logger.info(f"Evaluating on validation set...")
+                    val_metrics = self._validate()
+                    
+                    # Log validation metrics
+                    self.logger.info(f"Epoch {epoch+1}/{num_epochs} - Validation metrics:")
+                    for k, v in val_metrics.items():
+                        self.logger.info(f"  {k}: {v:.4f}")
+                        self.writer.add_scalar(f"val/{k}", v, epoch)
+                    
+                    # Save best model
+                    if val_metrics["loss"] < self.best_val_loss:
+                        self.best_val_loss = val_metrics["loss"]
+                        self._save_checkpoint("best.pth")
+                        self.logger.info(f"New best model saved with validation loss: {self.best_val_loss:.4f}")
+                
+                # Save checkpoint
+                if (epoch + 1) % save_every == 0:
+                    self._save_checkpoint(f"epoch_{epoch}.pth")
+                    self.logger.info(f"Checkpoint saved at epoch {epoch+1}")
+                
+                # Check for graceful exit
+                if _GRACEFUL_EXIT:
+                    self.logger.info("Graceful exit requested. Saving final checkpoint and exiting...")
+                    self._save_checkpoint(f"epoch_{epoch}_interrupted.pth")
+                    break
+                
+            # Save final model
+            self._save_checkpoint("final.pth")
+            self.logger.info("Training completed!")
+            
+        except KeyboardInterrupt:
+            self.logger.info("\nTraining interrupted by user. Saving checkpoint...")
+            self._save_checkpoint(f"epoch_{self.epoch}_interrupted.pth")
+            self.logger.info("Checkpoint saved. Exiting...")
+            
+        except Exception as e:
+            self.logger.error(f"Error during training: {str(e)}")
+            self._save_checkpoint("error_checkpoint.pth")
+            self.logger.info("Error checkpoint saved.")
+            raise
     
     def _train_epoch(self):
         """
@@ -219,15 +256,27 @@ class DistillationTrainer:
         """
         self.student_model.train()
         
-        total_loss = 0
-        total_logits_loss = 0
-        total_feature_loss = 0
-        total_attn_loss = 0
-        start_time = time.time()
+        # Initialize metrics
+        epoch_loss = 0
+        epoch_metrics = {}
         
-        progress_bar = tqdm(self.train_dataloader, desc="Training")
+        # Create a progress bar with tqdm
+        progress_bar = tqdm(
+            self.train_dataloader,
+            desc=f"Epoch {self.epoch+1}",
+            leave=True,
+            dynamic_ncols=True,
+            unit="batch"
+        )
         
+        # Training loop
         for step, batch in enumerate(progress_bar):
+            # Check for graceful exit
+            if _GRACEFUL_EXIT:
+                self.logger.info("Graceful exit requested. Saving checkpoint and exiting...")
+                self._save_checkpoint(f"epoch_{self.epoch}_interrupted.pth")
+                return {"total_loss": epoch_loss / (step + 1)}
+                
             # Move batch to device
             batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             
@@ -281,6 +330,9 @@ class DistillationTrainer:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.optimizer.zero_grad()
+                    
+                    if self.lr_scheduler is not None:
+                        self.lr_scheduler.step()
             else:
                 student_outputs = self.student_model(
                     pixel_values=batch["pixel_values"],
@@ -312,38 +364,51 @@ class DistillationTrainer:
                     # Update weights
                     self.optimizer.step()
                     self.optimizer.zero_grad()
+                    
+                    if self.lr_scheduler is not None:
+                        self.lr_scheduler.step()
             
             # Update metrics
-            total_loss += loss.item() * self.gradient_accumulation_steps
-            total_logits_loss += losses["logits_loss"].item()
-            total_feature_loss += losses.get("feature_loss", torch.tensor(0.0)).item()
-            total_attn_loss += losses.get("attn_loss", torch.tensor(0.0)).item()
+            epoch_loss += loss.item() * self.gradient_accumulation_steps
             
-            # Update progress bar
-            progress_bar.set_postfix({
+            # Update progress bar with metrics
+            metrics_to_display = {
                 "loss": loss.item() * self.gradient_accumulation_steps,
-                "logits_loss": losses["logits_loss"].item(),
-            })
+            }
+            
+            # Add individual loss components to metrics
+            for loss_name, loss_value in losses.items():
+                if loss_name != "total_loss":
+                    metrics_to_display[loss_name] = loss_value.item()
+                    
+            progress_bar.set_postfix(metrics_to_display)
+            
+            # Log to tensorboard
+            self.writer.add_scalar("train/loss", loss.item() * self.gradient_accumulation_steps, self.global_step)
+            self.writer.add_scalar("train/lr", self.optimizer.param_groups[0]["lr"], self.global_step)
+            
+            for loss_name, loss_value in losses.items():
+                self.writer.add_scalar(f"train/{loss_name}", loss_value.item(), self.global_step)
+            
+            # Update epoch metrics
+            for k, v in metrics_to_display.items():
+                if k not in epoch_metrics:
+                    epoch_metrics[k] = 0
+                epoch_metrics[k] += v
             
             self.global_step += 1
+            
+            # Check for graceful exit
+            if _GRACEFUL_EXIT:
+                self.logger.info("Graceful exit requested. Saving checkpoint and exiting...")
+                self._save_checkpoint(f"epoch_{self.epoch}_interrupted.pth")
+                return {"total_loss": epoch_loss / (step + 1)}
         
         # Compute average metrics
         num_batches = len(self.train_dataloader)
-        avg_loss = total_loss / num_batches
-        avg_logits_loss = total_logits_loss / num_batches
-        avg_feature_loss = total_feature_loss / num_batches
-        avg_attn_loss = total_attn_loss / num_batches
+        epoch_metrics = {k: v / num_batches for k, v in epoch_metrics.items()}
         
-        # Calculate training time
-        training_time = time.time() - start_time
-        
-        return {
-            "loss": avg_loss,
-            "logits_loss": avg_logits_loss,
-            "feature_loss": avg_feature_loss,
-            "attn_loss": avg_attn_loss,
-            "training_time": training_time,
-        }
+        return epoch_metrics
     
     def _validate(self):
         """
@@ -354,12 +419,18 @@ class DistillationTrainer:
         """
         self.student_model.eval()
         
-        total_loss = 0
-        total_logits_loss = 0
-        total_feature_loss = 0
-        total_attn_loss = 0
+        # Initialize metrics
+        epoch_loss = 0
+        epoch_metrics = {}
         
-        progress_bar = tqdm(self.val_dataloader, desc="Validating")
+        # Create a progress bar with tqdm
+        progress_bar = tqdm(
+            self.val_dataloader,
+            desc="Validation",
+            leave=True,
+            dynamic_ncols=True,
+            unit="batch"
+        )
         
         with torch.no_grad():
             for batch in progress_bar:
@@ -400,27 +471,31 @@ class DistillationTrainer:
                 loss = losses["total_loss"]
                 
                 # Update metrics
-                total_loss += loss.item()
-                total_logits_loss += losses["logits_loss"].item()
-                total_feature_loss += losses.get("feature_loss", torch.tensor(0.0)).item()
-                total_attn_loss += losses.get("attn_loss", torch.tensor(0.0)).item()
+                epoch_loss += loss.item()
                 
-                # Update progress bar
-                progress_bar.set_postfix({"val_loss": loss.item()})
+                # Update progress bar with metrics
+                metrics_to_display = {
+                    "loss": loss.item(),
+                }
+                
+                # Add individual loss components to metrics
+                for loss_name, loss_value in losses.items():
+                    if loss_name != "total_loss":
+                        metrics_to_display[loss_name] = loss_value.item()
+                        
+                progress_bar.set_postfix(metrics_to_display)
+                
+                # Update epoch metrics
+                for k, v in metrics_to_display.items():
+                    if k not in epoch_metrics:
+                        epoch_metrics[k] = 0
+                    epoch_metrics[k] += v
         
         # Compute average metrics
         num_batches = len(self.val_dataloader)
-        avg_loss = total_loss / num_batches
-        avg_logits_loss = total_logits_loss / num_batches
-        avg_feature_loss = total_feature_loss / num_batches
-        avg_attn_loss = total_attn_loss / num_batches
+        epoch_metrics = {k: v / num_batches for k, v in epoch_metrics.items()}
         
-        return {
-            "loss": avg_loss,
-            "logits_loss": avg_logits_loss,
-            "feature_loss": avg_feature_loss,
-            "attn_loss": avg_attn_loss,
-        }
+        return epoch_metrics
     
     def _save_checkpoint(self, name: str):
         """

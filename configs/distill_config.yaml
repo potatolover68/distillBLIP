@@ -1,26 +1,26 @@
 # Configuration for BLIP distillation training
 
 # Model configuration
-vision_model_name: "google/vit-base-patch16-224-in21k" 
+vision_model_name: "google/vit-base-patch16-224-in21k"
 text_model_name: "bert-base-uncased"
 vision_hidden_size: 768
 text_hidden_size: 768
 cross_attention_dim: 768
-num_visual_encoder_layers: 6  # Reduced from 12 in original ViT
-num_text_encoder_layers: 6    # Reduced from 12 in original text model
-num_text_decoder_layers: 6    # Reduced from 12 in original text model
-num_attention_heads: 8        # Reduced from 12 in original
-intermediate_size: 2048       # Reduced from 3072 in original
+num_visual_encoder_layers: 6 # Reduced from 12 in original ViT
+num_text_encoder_layers: 6 # Reduced from 12 in original text model
+num_text_decoder_layers: 6 # Reduced from 12 in original text model
+num_attention_heads: 8 # Reduced from 12 in original
+intermediate_size: 2048 # Reduced from 3072 in original
 
 # Distillation configuration
 distillation:
   temperature: 2.0
-  alpha: 0.5  # Weight balance between soft and hard targets
-  lambda_logits: 1.0  # Weight for logits distillation
-  lambda_feature: 0.5  # Weight for feature distillation
-  lambda_attn: 0.5  # Weight for attention distillation
-  use_feature_distillation: true
-  use_attn_distillation: true
+  alpha: 0.5 # Weight balance between soft and hard targets
+  lambda_logits: 1.0 # Weight for logits distillation
+  lambda_feature: 0.5 # Weight for feature distillation
+  lambda_attn: 0.5 # Weight for attention distillation
+  use_feature_distillation: false # Temporarily disabled to get training running
+  use_attn_distillation: false # Temporarily disabled to get training running
 
 # Data configuration
 data:
@@ -28,19 +28,21 @@ data:
   train_annotations: "data/coco/annotations/captions_train2017.json"
   val_image_dir: "data/coco/val2017"
   val_annotations: "data/coco/annotations/captions_val2017.json"
-  batch_size: 32
+  batch_size: 4 # Reduced from 32 for testing
   max_length: 30
-  num_workers: 4
+  num_workers: 2 # Reduced from 4 for testing
 
 # Training configuration
 training:
-  learning_rate: 5e-5
+  batch_size: 4
+  num_epochs: 10
+  learning_rate: 0.0001
   weight_decay: 0.01
-  beta1: 0.9
-  beta2: 0.999
-  mixed_precision: true
+  warmup_steps: 1000
+  mixed_precision: true  # Enable mixed precision for faster training with CUDA
+  device: "cuda"  # Use CUDA for GPU acceleration
+  save_steps: 100  # Save checkpoints frequently
+  eval_steps: 500
+  logging_steps: 10
   gradient_accumulation_steps: 1
   max_grad_norm: 1.0
-  warmup_ratio: 0.1
-  save_every: 1  # Save checkpoint every N epochs
-  eval_every: 1  # Evaluate every N epochs

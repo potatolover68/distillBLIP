@@ -3,6 +3,7 @@ from torch import nn
 import torch.nn.functional as F
 from transformers import ViTConfig, ViTModel
 from transformers.models.blip.modeling_blip import BlipTextModel, BlipConfig
+from transformers.models.blip.configuration_blip import BlipTextConfig
 from transformers.modeling_outputs import BaseModelOutputWithPooling, CausalLMOutputWithCrossAttentions
 
 class DistilledBLIPConfig:
@@ -58,8 +59,12 @@ class DistilledVisionEncoder(nn.Module):
     """A distilled version of the ViT model for vision encoding."""
     def __init__(self, config):
         super().__init__()
-        # Create a smaller ViT model
+        # Create a properly configured ViT model for 384x384 images
+        
+        # First, let's get the base configuration from the pretrained model
         vit_config = ViTConfig.from_pretrained(config.vision_model_name)
+        
+        # Update the configuration for our distilled model
         vit_config.num_hidden_layers = config.num_visual_encoder_layers
         vit_config.hidden_size = config.vision_hidden_size
         vit_config.intermediate_size = config.intermediate_size
@@ -67,7 +72,26 @@ class DistilledVisionEncoder(nn.Module):
         vit_config.hidden_dropout_prob = config.hidden_dropout_prob
         vit_config.attention_probs_dropout_prob = config.attention_probs_dropout_prob
         
+        # Set the image size to match the BLIP processor's default (384x384)
+        vit_config.image_size = 384
+        
+        # Initialize the ViT model with our custom configuration
         self.vision_model = ViTModel(vit_config)
+        
+        # Replace the patch embeddings to handle 384x384 images
+        # The key is to use the same patch size (16) but adjust the embeddings for the larger image
+        original_embeddings = self.vision_model.embeddings.patch_embeddings
+        
+        # Create new patch embeddings with the same configuration but for 384x384 images
+        from transformers.models.vit.modeling_vit import ViTPatchEmbeddings
+        
+        new_patch_embeddings = ViTPatchEmbeddings(vit_config)
+        # Copy the weights from the original embeddings
+        new_patch_embeddings.projection.weight.data = original_embeddings.projection.weight.data
+        new_patch_embeddings.projection.bias.data = original_embeddings.projection.bias.data
+        
+        # Replace the patch embeddings
+        self.vision_model.embeddings.patch_embeddings = new_patch_embeddings
         
     def forward(self, pixel_values):
         outputs = self.vision_model(pixel_values=pixel_values)
@@ -86,16 +110,38 @@ class DistilledTextDecoder(nn.Module):
     """A distilled version of the BERT model for text generation."""
     def __init__(self, config):
         super().__init__()
-        # Create a smaller BERT-based text model for the decoder
-        blip_config = BlipConfig.from_pretrained("Salesforce/blip-image-captioning-base")
-        blip_config.num_hidden_layers = config.num_text_decoder_layers
-        blip_config.hidden_size = config.text_hidden_size
-        blip_config.intermediate_size = config.intermediate_size
-        blip_config.num_attention_heads = config.num_attention_heads
-        blip_config.hidden_dropout_prob = config.hidden_dropout_prob
-        blip_config.attention_probs_dropout_prob = config.attention_probs_dropout_prob
         
-        self.text_model = BlipTextModel(blip_config)
+        # Import the BlipTextConfig directly
+        from transformers.models.blip.configuration_blip import BlipTextConfig
+        
+        # Create a text configuration directly
+        text_config = BlipTextConfig()
+        
+        # Set all required attributes for the text model
+        text_config.num_hidden_layers = config.num_text_decoder_layers
+        text_config.hidden_size = config.text_hidden_size
+        text_config.intermediate_size = config.intermediate_size
+        text_config.num_attention_heads = config.num_attention_heads
+        text_config.hidden_dropout_prob = config.hidden_dropout_prob
+        text_config.attention_probs_dropout_prob = config.attention_probs_dropout_prob
+        
+        # Make sure all required attributes are set
+        # Important: Use exactly 30524 for vocab_size to match the teacher model
+        text_config.vocab_size = 30524  # Explicitly set to match the teacher model's vocab size
+        text_config.max_position_embeddings = config.max_position_embeddings
+        text_config.pad_token_id = config.pad_token_id
+        text_config.bos_token_id = config.bos_token_id
+        text_config.eos_token_id = config.eos_token_id
+        text_config.use_cache = config.use_cache
+        text_config.type_vocab_size = config.type_vocab_size
+        
+        # Set other required attributes
+        text_config.hidden_act = 'gelu'
+        text_config.layer_norm_eps = 1e-12
+        text_config.is_decoder = True
+        
+        # Create the text model directly with the text config
+        self.text_model = BlipTextModel(text_config)
         
         # Add projection layer for vision features
         self.visual_projection = nn.Linear(

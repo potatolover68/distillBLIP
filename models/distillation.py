@@ -84,37 +84,78 @@ class FeatureDistillationLoss(nn.Module):
         Compute the feature distillation loss.
         
         Args:
-            student_features (torch.Tensor or list): Features from the student model.
-            teacher_features (torch.Tensor or list): Features from the teacher model.
+            student_features (torch.Tensor or list or tuple): Features from the student model.
+            teacher_features (torch.Tensor or list or tuple): Features from the teacher model.
             
         Returns:
             torch.Tensor: The computed feature distillation loss.
         """
-        # Check if the features are lists (e.g., hidden states from different layers)
-        if isinstance(student_features, list) and isinstance(teacher_features, list):
+        # Check if the features are lists or tuples (e.g., hidden states from different layers)
+        if (isinstance(student_features, (list, tuple)) and 
+            isinstance(teacher_features, (list, tuple))):
             total_loss = 0
-            for s_feat, t_feat in zip(student_features, teacher_features):
+            # Use only the features that are present in both student and teacher
+            min_length = min(len(student_features), len(teacher_features))
+            for i in range(min_length):
+                s_feat = student_features[i]
+                t_feat = teacher_features[i]
+                # Skip None values
+                if s_feat is None or t_feat is None:
+                    continue
                 total_loss += self._compute_loss(s_feat, t_feat)
-            return total_loss / len(student_features)
+            return total_loss / min_length if min_length > 0 else torch.tensor(0.0, device=student_features[0].device)
         else:
             return self._compute_loss(student_features, teacher_features)
     
     def _compute_loss(self, student_feat, teacher_feat):
         """Helper method to compute the loss between two feature tensors."""
-        # Ensure the features have the same shape by interpolation if needed
-        if student_feat.shape != teacher_feat.shape:
-            # If the shapes differ in sequence length (for text) or spatial dimensions (for images)
-            # you might need more complex alignment logic here
-            if len(student_feat.shape) == 3:  # For sequence data [batch, seq_len, hidden_dim]
+        # Ensure both inputs are tensors
+        if not isinstance(student_feat, torch.Tensor) or not isinstance(teacher_feat, torch.Tensor):
+            return torch.tensor(0.0, device=teacher_feat.device if isinstance(teacher_feat, torch.Tensor) else 
+                                           (student_feat.device if isinstance(student_feat, torch.Tensor) else 'cpu'))
+        
+        # For feature distillation with different dimensions, we need to project the features
+        # to the same dimension space before computing the loss
+        
+        # Get the shapes
+        student_shape = student_feat.shape
+        teacher_shape = teacher_feat.shape
+        
+        # If the hidden dimensions differ, we need to project one to match the other
+        if len(student_shape) == len(teacher_shape) and student_shape[:-1] == teacher_shape[:-1] and student_shape[-1] != teacher_shape[-1]:
+            # Project student features to teacher dimension space using a simple linear projection
+            if not hasattr(self, 'projection') or self.projection.in_features != student_shape[-1] or self.projection.out_features != teacher_shape[-1]:
+                # Create or update the projection layer
+                self.projection = nn.Linear(student_shape[-1], teacher_shape[-1], bias=False).to(student_feat.device)
+                # Initialize with identity-like mapping
+                nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
+            
+            # Project student features
+            projected_student_feat = self.projection(student_feat)
+            
+            # Now compute the loss with the projected features
+            if self.normalize:
+                projected_student_feat = F.normalize(projected_student_feat, p=2, dim=-1)
+                teacher_feat = F.normalize(teacher_feat, p=2, dim=-1)
+            
+            # Compute MSE loss
+            loss = F.mse_loss(projected_student_feat, teacher_feat)
+            return loss
+        
+        # If sequence lengths differ but hidden dimensions are the same
+        elif len(student_shape) == len(teacher_shape) and student_shape[-1] == teacher_shape[-1] and student_shape[1] != teacher_shape[1]:
+            # For sequence data [batch, seq_len, hidden_dim]
+            if len(student_shape) == 3:
                 student_feat = F.interpolate(
                     student_feat.transpose(1, 2),
-                    size=teacher_feat.shape[1],
+                    size=teacher_shape[1],
                     mode='linear'
                 ).transpose(1, 2)
-            elif len(student_feat.shape) == 4:  # For image data [batch, channels, height, width]
+            # For image data [batch, channels, height, width]
+            elif len(student_shape) == 4:
                 student_feat = F.interpolate(
                     student_feat,
-                    size=(teacher_feat.shape[2], teacher_feat.shape[3]),
+                    size=(teacher_shape[2], teacher_shape[3]),
                     mode='bilinear'
                 )
         
@@ -123,9 +164,8 @@ class FeatureDistillationLoss(nn.Module):
             student_feat = F.normalize(student_feat, p=2, dim=-1)
             teacher_feat = F.normalize(teacher_feat, p=2, dim=-1)
         
-        # Compute MSE loss between features
+        # Compute MSE loss
         loss = F.mse_loss(student_feat, teacher_feat)
-        
         return loss
 
 

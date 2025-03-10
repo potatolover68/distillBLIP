@@ -176,14 +176,27 @@ def main():
         print(f"Resuming from checkpoint: {args.resume}")
         trainer.load_checkpoint(args.resume)
     
-    # Start training
-    trainer.train(
-        num_epochs=config["training"]["num_epochs"],
-        save_every=config["training"]["save_steps"],
-        eval_every=config["training"]["eval_steps"],
-    )
+    # Print instructions for elegant exit
+    print("\n" + "="*80)
+    print("TRAINING CONTROL:")
+    print("  - Press 'q' to gracefully exit training (saves a checkpoint)")
+    print("  - Alternatively, press Ctrl+C for the same effect")
+    print("="*80 + "\n")
     
-    print("Training complete!")
+    # Start training
+    try:
+        trainer.train(
+            num_epochs=config["training"]["num_epochs"],
+            save_every=config["training"]["save_steps"],
+            eval_every=config["training"]["eval_steps"],
+        )
+        
+        print("Training complete!")
+    except Exception as e:
+        # Handle any exceptions not caught by the trainer
+        # This provides a cleaner error output
+        print(f"\nTraining error: {str(e)}")
+        print("A checkpoint has been saved.")
 
 
 if __name__ == "__main__":

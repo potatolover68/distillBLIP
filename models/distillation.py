@@ -153,6 +153,9 @@ class FeatureDistillationLoss(nn.Module):
                 if self.projection is None or self.projection.in_features != student_feat.shape[2] or self.projection.out_features != teacher_shape[2]:
                     self.projection = nn.Linear(student_feat.shape[2], teacher_shape[2], bias=False).to(student_feat.device)
                     nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
+                elif self.projection.weight.device != student_feat.device:
+                    # Ensure the projection layer is on the same device as student_feat
+                    self.projection = self.projection.to(student_feat.device)
                 
                 # Apply projection - safer approach to avoid reshape issues
                 batch_size, seq_len = student_feat.shape[:2]
@@ -170,6 +173,9 @@ class FeatureDistillationLoss(nn.Module):
             if self.projection is None or self.projection.in_features != student_shape[1] or self.projection.out_features != teacher_shape[1]:
                 self.projection = nn.Linear(student_shape[1], teacher_shape[1], bias=False).to(student_feat.device)
                 nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
+            elif self.projection.weight.device != student_feat.device:
+                # Ensure the projection layer is on the same device as student_feat
+                self.projection = self.projection.to(student_feat.device)
             student_feat = self.projection(student_feat)
             print(f"After 2D projection: {student_feat.shape}")
         
@@ -192,6 +198,9 @@ class FeatureDistillationLoss(nn.Module):
                 if self.projection is None or self.projection.in_features != student_shape[1] or self.projection.out_features != teacher_shape[1]:
                     self.projection = nn.Conv2d(student_shape[1], teacher_shape[1], kernel_size=1, bias=False).to(student_feat.device)
                     nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
+                elif self.projection.weight.device != student_feat.device:
+                    # Ensure the projection layer is on the same device as student_feat
+                    self.projection = self.projection.to(student_feat.device)
                 student_feat = self.projection(student_feat)
                 print(f"After channel projection: {student_feat.shape}")
         

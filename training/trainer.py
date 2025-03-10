@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import signal
+import msvcrt  # For Windows keyboard input detection
 from typing import Dict, List, Optional, Tuple, Union, Any
 
 import torch
@@ -33,6 +34,16 @@ def graceful_exit_handler(signum, frame):
 # Register signal handlers
 signal.signal(signal.SIGINT, graceful_exit_handler)
 
+def check_for_exit_key():
+    """Check if the 'q' key has been pressed to exit gracefully."""
+    global _GRACEFUL_EXIT
+    if msvcrt.kbhit():
+        key = msvcrt.getch().decode('utf-8').lower()
+        if key == 'q':
+            print("\nExit key 'q' pressed. Will save checkpoint and exit after current batch...")
+            _GRACEFUL_EXIT = True
+            return True
+    return False
 
 class DistillationTrainer:
     """
@@ -316,10 +327,13 @@ class DistillationTrainer:
             unit="batch"
         )
         
+        # Print instructions for graceful exit
+        print("\nPress 'q' at any time to gracefully exit training (saving a checkpoint)...")
+        
         # Training loop
         for step, batch in enumerate(progress_bar):
-            # Check for graceful exit
-            if _GRACEFUL_EXIT:
+            # Check for graceful exit (both signal handler and keyboard press)
+            if _GRACEFUL_EXIT or check_for_exit_key():
                 self.logger.info("Graceful exit requested. Saving checkpoint and exiting...")
                 self._save_checkpoint(f"epoch_{self.epoch}_interrupted.pth")
                 return {"total_loss": epoch_loss / (step + 1)}
@@ -448,7 +462,7 @@ class DistillationTrainer:
             self.global_step += 1
             
             # Check for graceful exit
-            if _GRACEFUL_EXIT:
+            if _GRACEFUL_EXIT or check_for_exit_key():
                 self.logger.info("Graceful exit requested. Saving checkpoint and exiting...")
                 self._save_checkpoint(f"epoch_{self.epoch}_interrupted.pth")
                 return {"total_loss": epoch_loss / (step + 1)}

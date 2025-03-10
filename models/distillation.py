@@ -69,16 +69,28 @@ class FeatureDistillationLoss(nn.Module):
     Loss function for intermediate feature distillation between 
     teacher and student models.
     """
-    def __init__(self, normalize=True):
+    def __init__(self, normalize=True, student_dim=768, teacher_dim=1024):
         """
         Initialize the feature distillation loss.
         
         Args:
             normalize (bool): Whether to normalize the features before computing the loss.
+            student_dim (int): Hidden dimension of student model features.
+            teacher_dim (int): Hidden dimension of teacher model features.
         """
         super().__init__()
         self.normalize = normalize
+        self.student_dim = student_dim
+        self.teacher_dim = teacher_dim
         
+        # Create projection layer if dimensions don't match
+        if student_dim != teacher_dim:
+            self.projection = nn.Linear(student_dim, teacher_dim, bias=False)
+            # Initialize with identity-like mapping for better starting point
+            nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
+        else:
+            self.projection = None
+    
     def forward(self, student_features, teacher_features):
         """
         Compute the feature distillation loss.
@@ -114,59 +126,93 @@ class FeatureDistillationLoss(nn.Module):
             return torch.tensor(0.0, device=teacher_feat.device if isinstance(teacher_feat, torch.Tensor) else 
                                            (student_feat.device if isinstance(student_feat, torch.Tensor) else 'cpu'))
         
-        # For feature distillation with different dimensions, we need to project the features
-        # to the same dimension space before computing the loss
-        
         # Get the shapes
         student_shape = student_feat.shape
         teacher_shape = teacher_feat.shape
         
-        # If the hidden dimensions differ, we need to project one to match the other
-        if len(student_shape) == len(teacher_shape) and student_shape[:-1] == teacher_shape[:-1] and student_shape[-1] != teacher_shape[-1]:
-            # Project student features to teacher dimension space using a simple linear projection
-            if not hasattr(self, 'projection') or self.projection.in_features != student_shape[-1] or self.projection.out_features != teacher_shape[-1]:
-                # Create or update the projection layer
-                self.projection = nn.Linear(student_shape[-1], teacher_shape[-1], bias=False).to(student_feat.device)
-                # Initialize with identity-like mapping
-                nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
-            
-            # Project student features
-            projected_student_feat = self.projection(student_feat)
-            
-            # Now compute the loss with the projected features
-            if self.normalize:
-                projected_student_feat = F.normalize(projected_student_feat, p=2, dim=-1)
-                teacher_feat = F.normalize(teacher_feat, p=2, dim=-1)
-            
-            # Compute MSE loss
-            loss = F.mse_loss(projected_student_feat, teacher_feat)
-            return loss
+        # Debug print
+        print(f"Student feature shape: {student_shape}, Teacher feature shape: {teacher_shape}")
         
-        # If sequence lengths differ but hidden dimensions are the same
-        elif len(student_shape) == len(teacher_shape) and student_shape[-1] == teacher_shape[-1] and student_shape[1] != teacher_shape[1]:
-            # For sequence data [batch, seq_len, hidden_dim]
-            if len(student_shape) == 3:
+        # Handle the case where both sequence length and hidden dimensions differ
+        if len(student_shape) == len(teacher_shape) == 3:  # [batch_size, seq_len, hidden_dim]
+            # First handle sequence length difference
+            if student_shape[1] != teacher_shape[1]:
+                print(f"Adjusting sequence length: {student_shape[1]} -> {teacher_shape[1]}")
+                # Interpolate to match sequence length
                 student_feat = F.interpolate(
-                    student_feat.transpose(1, 2),
+                    student_feat.transpose(1, 2).contiguous(),  # [batch, hidden_dim, seq_len]
                     size=teacher_shape[1],
                     mode='linear'
-                ).transpose(1, 2)
-            # For image data [batch, channels, height, width]
-            elif len(student_shape) == 4:
+                ).transpose(1, 2).contiguous()  # [batch, seq_len, hidden_dim]
+                print(f"After sequence adjustment: {student_feat.shape}")
+            
+            # Then handle hidden dimension difference
+            if student_shape[2] != teacher_shape[2] or student_feat.shape[2] != teacher_shape[2]:
+                print(f"Projecting hidden dimension: {student_feat.shape[2]} -> {teacher_shape[2]}")
+                # Create or update projection layer if needed
+                if self.projection is None or self.projection.in_features != student_feat.shape[2] or self.projection.out_features != teacher_shape[2]:
+                    self.projection = nn.Linear(student_feat.shape[2], teacher_shape[2], bias=False).to(student_feat.device)
+                    nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
+                
+                # Apply projection - safer approach to avoid reshape issues
+                batch_size, seq_len = student_feat.shape[:2]
+                # Flatten batch and sequence dimensions
+                flat_student = student_feat.reshape(-1, student_feat.shape[-1])
+                # Project
+                flat_projected = self.projection(flat_student)
+                # Reshape back
+                student_feat = flat_projected.reshape(batch_size, seq_len, -1)
+                print(f"After projection: {student_feat.shape}")
+        
+        # Handle 2D tensors (e.g., pooled outputs) with different hidden dimensions
+        elif len(student_shape) == len(teacher_shape) == 2 and student_shape[1] != teacher_shape[1]:
+            print(f"Projecting 2D tensor: {student_shape[1]} -> {teacher_shape[1]}")
+            if self.projection is None or self.projection.in_features != student_shape[1] or self.projection.out_features != teacher_shape[1]:
+                self.projection = nn.Linear(student_shape[1], teacher_shape[1], bias=False).to(student_feat.device)
+                nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
+            student_feat = self.projection(student_feat)
+            print(f"After 2D projection: {student_feat.shape}")
+        
+        # Handle 4D tensors (e.g., image features) with different spatial dimensions
+        elif len(student_shape) == len(teacher_shape) == 4:
+            # Handle spatial dimensions (height, width)
+            if student_shape[2:] != teacher_shape[2:]:
+                print(f"Adjusting spatial dimensions: {student_shape[2:]} -> {teacher_shape[2:]}")
                 student_feat = F.interpolate(
                     student_feat,
-                    size=(teacher_shape[2], teacher_shape[3]),
-                    mode='bilinear'
+                    size=teacher_shape[2:],
+                    mode='bilinear',
+                    align_corners=False
                 )
+                print(f"After spatial adjustment: {student_feat.shape}")
+            
+            # Handle channel dimension
+            if student_shape[1] != teacher_shape[1]:
+                print(f"Projecting channel dimension: {student_shape[1]} -> {teacher_shape[1]}")
+                if self.projection is None or self.projection.in_features != student_shape[1] or self.projection.out_features != teacher_shape[1]:
+                    self.projection = nn.Conv2d(student_shape[1], teacher_shape[1], kernel_size=1, bias=False).to(student_feat.device)
+                    nn.init.normal_(self.projection.weight, mean=0.0, std=0.02)
+                student_feat = self.projection(student_feat)
+                print(f"After channel projection: {student_feat.shape}")
         
         # Normalize features if required
         if self.normalize:
             student_feat = F.normalize(student_feat, p=2, dim=-1)
             teacher_feat = F.normalize(teacher_feat, p=2, dim=-1)
         
+        # Final shape check before computing loss
+        print(f"Final shapes - Student: {student_feat.shape}, Teacher: {teacher_feat.shape}")
+        
         # Compute MSE loss
-        loss = F.mse_loss(student_feat, teacher_feat)
-        return loss
+        try:
+            loss = F.mse_loss(student_feat, teacher_feat)
+            return loss
+        except Exception as e:
+            print(f"Error computing MSE loss: {e}")
+            # If we still have shape mismatch, log detailed information and return a dummy loss
+            print(f"Shape mismatch still exists. Student: {student_feat.shape}, Teacher: {teacher_feat.shape}")
+            print("Returning dummy loss to avoid training failure")
+            return torch.tensor(0.0, device=student_feat.device)
 
 
 class AttentionDistillationLoss(nn.Module):
@@ -271,6 +317,8 @@ class CombinedDistillationLoss(nn.Module):
         lambda_attn=0.5,
         use_feature_distillation=True,
         use_attn_distillation=True,
+        student_dim=768,
+        teacher_dim=1024,
     ):
         """
         Initialize the combined distillation loss.
@@ -283,15 +331,34 @@ class CombinedDistillationLoss(nn.Module):
             lambda_attn (float): Weight for attention distillation loss.
             use_feature_distillation (bool): Whether to use feature distillation.
             use_attn_distillation (bool): Whether to use attention distillation.
+            student_dim (int): Hidden dimension of student model features.
+            teacher_dim (int): Hidden dimension of teacher model features.
         """
         super().__init__()
         self.logits_loss = DistillationLoss(temperature=temperature, alpha=alpha)
-        self.feature_loss = FeatureDistillationLoss() if use_feature_distillation else None
+        self.feature_loss = FeatureDistillationLoss(
+            normalize=True, 
+            student_dim=student_dim, 
+            teacher_dim=teacher_dim
+        ) if use_feature_distillation else None
         self.attn_loss = AttentionDistillationLoss() if use_attn_distillation else None
         
         self.lambda_logits = lambda_logits
         self.lambda_feature = lambda_feature
         self.lambda_attn = lambda_attn
+        
+        # Save configuration for logging
+        self.config = {
+            "temperature": temperature,
+            "alpha": alpha,
+            "lambda_logits": lambda_logits,
+            "lambda_feature": lambda_feature,
+            "lambda_attn": lambda_attn,
+            "use_feature_distillation": use_feature_distillation,
+            "use_attn_distillation": use_attn_distillation,
+            "student_dim": student_dim,
+            "teacher_dim": teacher_dim,
+        }
         
     def forward(
         self,

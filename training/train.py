@@ -152,6 +152,13 @@ def main():
     total_steps = len(train_dataloader) * config["training"]["num_epochs"] // config["training"]["gradient_accumulation_steps"]
     config["training"]["total_steps"] = total_steps
     
+    # Add model dimensions to distillation config for proper feature projection
+    if "distillation" not in config:
+        config["distillation"] = {}
+    
+    config["distillation"]["student_dim"] = config["model"]["vision_hidden_size"]  # Student hidden size
+    config["distillation"]["teacher_dim"] = config["model"]["teacher_hidden_size"]  # Teacher hidden size
+    
     # Create trainer
     trainer = DistillationTrainer(
         teacher_model=teacher_model,

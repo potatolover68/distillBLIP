@@ -3,6 +3,8 @@ import sys
 import argparse
 import yaml
 import torch
+import random
+import numpy as np
 from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 
@@ -50,16 +52,15 @@ def parse_args():
         help="Path to a checkpoint to resume training from"
     )
     parser.add_argument(
-        "--num_epochs", 
-        type=int, 
-        default=10,
-        help="Number of epochs to train for"
-    )
-    parser.add_argument(
         "--seed", 
         type=int, 
         default=42,
         help="Random seed for reproducibility"
+    )
+    parser.add_argument(
+        "--profile", 
+        action="store_true",
+        help="Enable profiling for performance analysis"
     )
     return parser.parse_args()
 
@@ -71,9 +72,29 @@ def load_config(config_path):
 
 
 def set_seed(seed):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        # Set deterministic behavior for reproducibility
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def optimize_gpu_memory():
+    """Apply GPU memory optimizations."""
+    # Empty cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+    # Set memory fraction
+    if torch.cuda.is_available():
+        # Reserve 90% of GPU memory for this process
+        for device in range(torch.cuda.device_count()):
+            device_props = torch.cuda.get_device_properties(device)
+            print(f"GPU {device}: {device_props.name} with {device_props.total_memory / 1e9:.2f} GB memory")
 
 
 def main():
@@ -83,7 +104,10 @@ def main():
     config = load_config(config_path)
     
     # Set random seed for reproducibility
-    set_seed(42)
+    set_seed(args.seed)
+    
+    # Optimize GPU memory usage
+    optimize_gpu_memory()
     
     # Create output directories
     os.makedirs(args.output_dir, exist_ok=True)
@@ -104,6 +128,13 @@ def main():
     print("Loading data...")
     data_config = config.get("data", {})
     
+    # Configure data loading optimizations
+    dataloader_kwargs = {
+        "pin_memory": config.get("training", {}).get("dataloader_pin_memory", True),
+        "prefetch_factor": config.get("training", {}).get("dataloader_prefetch_factor", 2),
+        "persistent_workers": True if data_config.get("num_workers", 4) > 0 else False,
+    }
+    
     train_dataloader = get_captioning_dataloader(
         dataset_name=data_config.get("dataset", "coco"),
         split="train",
@@ -112,6 +143,7 @@ def main():
         max_length=data_config.get("max_length", 30),
         subset_size=data_config.get("subset_size", None),
         num_workers=data_config.get("num_workers", 4),
+        **dataloader_kwargs
     )
     
     val_dataloader = get_captioning_dataloader(
@@ -122,6 +154,7 @@ def main():
         max_length=data_config.get("max_length", 30),
         subset_size=data_config.get("subset_size", None),
         num_workers=data_config.get("num_workers", 4),
+        **dataloader_kwargs
     )
     
     # Set up distillation loss
@@ -188,6 +221,10 @@ def main():
         mixed_precision=training_config.get("mixed_precision", True),
         gradient_accumulation_steps=training_config.get("gradient_accumulation_steps", 1),
         max_grad_norm=training_config.get("max_grad_norm", 1.0),
+        fp16_opt_level=training_config.get("fp16_opt_level", "O2"),
+        use_amp=training_config.get("use_amp", True),
+        use_gradient_checkpointing=training_config.get("use_gradient_checkpointing", False),
+        use_compile=training_config.get("use_compile", False),
     )
     
     # Resume from checkpoint if specified
@@ -205,6 +242,29 @@ def main():
                     print(f"Resuming from epoch {start_epoch}")
         except:
             print("Could not determine starting epoch from checkpoint name. Starting from the beginning.")
+    
+    # Enable profiling if requested
+    if args.profile:
+        print("Enabling profiling for performance analysis...")
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(args.log_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True
+        ) as prof:
+            # Train for a few steps with profiling
+            for _ in range(5):
+                trainer._train_epoch()
+                prof.step()
+            
+            # Print profiling results
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+            sys.exit(0)
     
     # Train the model
     print("Starting training...")

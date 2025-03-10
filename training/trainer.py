@@ -39,6 +39,7 @@ class DistillationTrainer:
     """
     Trainer class for knowledge distillation of BLIP models.
     """
+    
     def __init__(
         self,
         teacher_model: Optional[BLIPTeacherModel] = None,
@@ -57,6 +58,10 @@ class DistillationTrainer:
         mixed_precision: bool = True,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
+        fp16_opt_level: str = "O2",
+        use_amp: bool = True,
+        use_gradient_checkpointing: bool = False,
+        use_compile: bool = False,
     ):
         """
         Initialize the distillation trainer.
@@ -78,6 +83,10 @@ class DistillationTrainer:
             mixed_precision: Whether to use mixed precision training.
             gradient_accumulation_steps: Number of steps to accumulate gradients.
             max_grad_norm: Maximum gradient norm for gradient clipping.
+            fp16_opt_level: Mixed precision optimization level.
+            use_amp: Whether to use automatic mixed precision.
+            use_gradient_checkpointing: Whether to use gradient checkpointing to save memory.
+            use_compile: Whether to use torch.compile for faster training.
         """
         self.device = device
         self.output_dir = output_dir
@@ -85,6 +94,10 @@ class DistillationTrainer:
         self.mixed_precision = mixed_precision
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
+        self.fp16_opt_level = fp16_opt_level
+        self.use_amp = use_amp
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.use_compile = use_compile
         
         # Create directories if they don't exist
         os.makedirs(output_dir, exist_ok=True)
@@ -124,6 +137,16 @@ class DistillationTrainer:
             self.student_model = DistilledBLIPForConditionalGeneration(student_config)
         
         self.student_model = self.student_model.to(device)
+        
+        # Apply gradient checkpointing if enabled
+        if self.use_gradient_checkpointing and hasattr(self.student_model, "gradient_checkpointing_enable"):
+            self.logger.info("Enabling gradient checkpointing...")
+            self.student_model.gradient_checkpointing_enable()
+        
+        # Apply torch.compile if enabled and available
+        if self.use_compile and hasattr(torch, "compile") and torch.__version__ >= "2.0.0":
+            self.logger.info("Compiling student model with torch.compile()...")
+            self.student_model = torch.compile(self.student_model)
         
         # Setup distillation loss
         default_distill_config = {
@@ -170,6 +193,11 @@ class DistillationTrainer:
         self.best_val_loss = float("inf")
         
         self.logger.info("Distillation trainer initialized successfully!")
+        
+        # Log GPU memory usage
+        if torch.cuda.is_available():
+            self.logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+            self.logger.info(f"GPU memory reserved: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
     
     def train(self, num_epochs: int, save_every: int = 1, eval_every: int = 1):
         """

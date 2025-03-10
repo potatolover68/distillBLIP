@@ -2,6 +2,7 @@
 
 # Model configuration
 model:
+  teacher_model_name: "Salesforce/blip-image-captioning-large"
   vision_model_name: "google/vit-base-patch16-224-in21k"
   text_model_name: "bert-base-uncased"
   vision_hidden_size: 768
@@ -45,9 +46,13 @@ training:
   eval_steps: 1  # Evaluate every epoch
   gradient_accumulation_steps: 4  # Accumulate gradients for effective batch size of 64
   max_grad_norm: 1.0
-  fp16_opt_level: "O2"  # More aggressive mixed precision optimization
+  fp16_opt_level: "O1"  # Changed from O2 to O1 for better compatibility
   use_amp: true  # Use automatic mixed precision
   use_gradient_checkpointing: true  # Save memory at the cost of some speed
   dataloader_pin_memory: true  # Speed up data transfer to GPU
-  dataloader_prefetch_factor: 2  # Prefetch batches
-  use_compile: true  # Use torch.compile() for faster training (PyTorch 2.0+)
+  dataloader_prefetch_factor: 2  # Prefetch batches for faster data loading
+  dataloader_persistent_workers: true  # Keep workers alive between epochs
+  use_torch_compile: false  # Disable torch.compile as it's causing issues
+  compile_mode: null  # Not used when use_torch_compile is false
+  deterministic: false  # Set to true if you need reproducible results
+  profile: false  # Set to true to enable profiling (also can be enabled with --profile flag)

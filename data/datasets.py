@@ -151,35 +151,66 @@ class CaptioningDataset(Dataset):
 
 
 def get_captioning_dataloader(
-    image_dir: str,
+    image_dir: Optional[str] = None,
     annotations_file: Optional[str] = None,
     processor: Optional[BlipProcessor] = None,
     processor_name: str = "Salesforce/blip-image-captioning-large",
     batch_size: int = 32,
     max_length: int = 30,
     split: str = "train",
-    shuffle: bool = True,
+    shuffle: bool = None,
     num_workers: int = 4,
     preprocess_images: bool = True,
+    dataset_name: Optional[str] = None,
+    image_size: int = 384,
+    subset_size: Optional[int] = None,
+    pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = False,
 ):
     """
     Create a DataLoader for image captioning.
     
     Args:
-        image_dir (str): Directory containing the images.
+        image_dir (str, optional): Directory containing the images.
         annotations_file (str, optional): Path to annotations file with captions.
         processor (BlipProcessor, optional): Processor for tokenizing text and preprocessing images.
         processor_name (str): Name of the processor to load if not provided.
         batch_size (int): Batch size for the dataloader.
         max_length (int): Maximum sequence length for captions.
         split (str): Dataset split ('train', 'val', or 'test').
-        shuffle (bool): Whether to shuffle the data.
+        shuffle (bool, optional): Whether to shuffle the data. Defaults to True for train, False otherwise.
         num_workers (int): Number of workers for data loading.
         preprocess_images (bool): Whether to preprocess images during loading.
+        dataset_name (str, optional): Name of the dataset to use (e.g., 'coco'). If provided, will use predefined paths.
+        image_size (int): Size to resize images to.
+        subset_size (int, optional): If provided, use only a subset of this size from the dataset.
+        pin_memory (bool): Whether to pin memory in the dataloader.
+        prefetch_factor (int): Number of batches to prefetch.
+        persistent_workers (bool): Whether to keep worker processes alive after dataset iteration.
         
     Returns:
         DataLoader: DataLoader for the captioning dataset.
     """
+    # Set default shuffle based on split if not explicitly provided
+    if shuffle is None:
+        shuffle = (split == "train")
+    
+    # Handle dataset_name to set default paths
+    if dataset_name is not None:
+        if dataset_name.lower() == "coco":
+            # Set default COCO paths if not provided
+            if image_dir is None:
+                image_dir = f"data/coco/{split}2017"
+            if annotations_file is None:
+                annotations_file = f"data/coco/annotations/captions_{split}2017.json"
+        else:
+            raise ValueError(f"Unsupported dataset_name: {dataset_name}")
+    
+    # Ensure image_dir is provided
+    if image_dir is None:
+        raise ValueError("Either image_dir or dataset_name must be provided")
+    
     dataset = CaptioningDataset(
         image_dir=image_dir,
         annotations_file=annotations_file,
@@ -190,13 +221,29 @@ def get_captioning_dataloader(
         preprocess_images=preprocess_images
     )
     
+    # Apply subset if specified
+    if subset_size is not None and subset_size > 0 and subset_size < len(dataset):
+        indices = torch.randperm(len(dataset))[:subset_size]
+        dataset = torch.utils.data.Subset(dataset, indices)
+    
+    dataloader_kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "collate_fn": collate_fn if not preprocess_images else None,
+    }
+    
+    # Add additional kwargs only if num_workers > 0
+    if num_workers > 0:
+        dataloader_kwargs.update({
+            "prefetch_factor": prefetch_factor,
+            "persistent_workers": persistent_workers
+        })
+    
     dataloader = DataLoader(
         dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True,
-        collate_fn=collate_fn if not preprocess_images else None,
+        **dataloader_kwargs
     )
     
     return dataloader

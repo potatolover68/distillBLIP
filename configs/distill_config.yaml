@@ -1,16 +1,20 @@
 # Configuration for BLIP distillation training
 
 # Model configuration
-vision_model_name: "google/vit-base-patch16-224-in21k"
-text_model_name: "bert-base-uncased"
-vision_hidden_size: 768
-text_hidden_size: 768
-cross_attention_dim: 768
-num_visual_encoder_layers: 6 # Reduced from 12 in original ViT
-num_text_encoder_layers: 6 # Reduced from 12 in original text model
-num_text_decoder_layers: 6 # Reduced from 12 in original text model
-num_attention_heads: 8 # Reduced from 12 in original
-intermediate_size: 2048 # Reduced from 3072 in original
+model:
+  teacher_model_name: "Salesforce/blip-image-captioning-large"
+  teacher_hidden_size: 1024 # The hidden size of the teacher model
+  vision_model_name: "google/vit-base-patch16-224-in21k"
+  text_model_name: "bert-base-uncased"
+  vision_hidden_size: 768
+  text_hidden_size: 768
+  cross_attention_dim: 768
+  num_visual_encoder_layers: 6 # Reduced from 12 in original ViT
+  num_text_encoder_layers: 6 # Reduced from 12 in original text model
+  num_text_decoder_layers: 6 # Reduced from 12 in original text model
+  num_attention_heads: 8 # Reduced from 12 in original
+  intermediate_size: 2048 # Reduced from 3072 in original
+  vocab_size: 30524 # Match teacher model's vocabulary size
 
 # Distillation configuration
 distillation:
@@ -19,30 +23,37 @@ distillation:
   lambda_logits: 1.0 # Weight for logits distillation
   lambda_feature: 0.5 # Weight for feature distillation
   lambda_attn: 0.5 # Weight for attention distillation
-  use_feature_distillation: false # Temporarily disabled to get training running
-  use_attn_distillation: false # Temporarily disabled to get training running
+  use_feature_distillation: true # Enable for better knowledge transfer
+  use_attn_distillation: true # Enable for better knowledge transfer
 
 # Data configuration
 data:
-  train_image_dir: "data/coco/train2017"
-  train_annotations: "data/coco/annotations/captions_train2017.json"
-  val_image_dir: "data/coco/val2017"
-  val_annotations: "data/coco/annotations/captions_val2017.json"
-  batch_size: 4 # Reduced from 32 for testing
+  dataset: "coco"
+  batch_size: 16 # Increased for faster training
   max_length: 30
-  num_workers: 2 # Reduced from 4 for testing
+  num_workers: 8 # Increased to speed up data loading
+  image_size: 384
+  subset_size: null # Set to a number like 10000 for faster debugging
 
 # Training configuration
 training:
-  batch_size: 4
-  num_epochs: 10
+  num_epochs: 500
   learning_rate: 0.0001
   weight_decay: 0.01
   warmup_steps: 1000
-  mixed_precision: true  # Enable mixed precision for faster training with CUDA
-  device: "cuda"  # Use CUDA for GPU acceleration
-  save_steps: 100  # Save checkpoints frequently
-  eval_steps: 500
-  logging_steps: 10
-  gradient_accumulation_steps: 1
+  mixed_precision: true # Enable mixed precision for faster training with CUDA
+  device: "cuda" # Use CUDA for GPU acceleration
+  save_steps: 1 # Save checkpoints every epoch
+  eval_steps: 1 # Evaluate every epoch
+  gradient_accumulation_steps: 4 # Accumulate gradients for effective batch size of 64
   max_grad_norm: 1.0
+  fp16_opt_level: "O1" # Changed from O2 to O1 for better compatibility
+  use_amp: true # Use automatic mixed precision
+  use_gradient_checkpointing: true # Save memory at the cost of some speed
+  dataloader_pin_memory: true # Speed up data transfer to GPU
+  dataloader_prefetch_factor: 2 # Prefetch batches for faster data loading
+  dataloader_persistent_workers: true # Keep workers alive between epochs
+  use_torch_compile: false # Disable torch.compile as it's causing issues
+  compile_mode: null # Not used when use_torch_compile is false
+  deterministic: false # Set to true if you need reproducible results
+  profile: false # Set to true to enable profiling (also can be enabled with --profile flag)

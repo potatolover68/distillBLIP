@@ -1,8 +1,8 @@
 import os
 import time
 import logging
-import warnings
 import signal
+import msvcrt  # For Windows keyboard input detection
 from typing import Dict, List, Optional, Tuple, Union, Any
 
 import torch
@@ -14,13 +14,13 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from PIL import Image
 
+# Import warning suppression utility
+from utils.suppress_warnings import suppress_all_warnings
+
 from models.teacher_model import BLIPTeacherModel
 from models.student_model import DistilledBLIPForConditionalGeneration, DistilledBLIPConfig
 from models.distillation import CombinedDistillationLoss
-
-# Filter out FutureWarnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning, message=".*User provided device_type of 'cuda'.")
+from transformers import get_linear_schedule_with_warmup
 
 # Global flag for graceful exit
 _GRACEFUL_EXIT = False
@@ -34,11 +34,22 @@ def graceful_exit_handler(signum, frame):
 # Register signal handlers
 signal.signal(signal.SIGINT, graceful_exit_handler)
 
+def check_for_exit_key():
+    """Check if the 'q' key has been pressed to exit gracefully."""
+    global _GRACEFUL_EXIT
+    if msvcrt.kbhit():
+        key = msvcrt.getch().decode('utf-8').lower()
+        if key == 'q':
+            print("\nExit key 'q' pressed. Will save checkpoint and exit after current batch...")
+            _GRACEFUL_EXIT = True
+            return True
+    return False
 
 class DistillationTrainer:
     """
     Trainer class for knowledge distillation of BLIP models.
     """
+    
     def __init__(
         self,
         teacher_model: Optional[BLIPTeacherModel] = None,
@@ -48,15 +59,10 @@ class DistillationTrainer:
         train_dataloader: Optional[DataLoader] = None,
         val_dataloader: Optional[DataLoader] = None,
         loss_fn: Optional[nn.Module] = None,
-        optimizer: Optional[torch.optim.Optimizer] = None,
-        lr_scheduler: Optional[Any] = None,
-        distill_config: Dict[str, Any] = None,
+        config: Dict[str, Any] = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         output_dir: str = "checkpoints",
         log_dir: str = "logs",
-        mixed_precision: bool = True,
-        gradient_accumulation_steps: int = 1,
-        max_grad_norm: float = 1.0,
     ):
         """
         Initialize the distillation trainer.
@@ -69,22 +75,14 @@ class DistillationTrainer:
             train_dataloader: DataLoader for training data.
             val_dataloader: DataLoader for validation data.
             loss_fn: Loss function for distillation.
-            optimizer: Optimizer for training the student model.
-            lr_scheduler: Learning rate scheduler.
-            distill_config: Configuration for distillation process.
+            config: Configuration for training.
             device: Device to run the training on ("cuda" or "cpu").
             output_dir: Directory to save model checkpoints.
             log_dir: Directory to save training logs.
-            mixed_precision: Whether to use mixed precision training.
-            gradient_accumulation_steps: Number of steps to accumulate gradients.
-            max_grad_norm: Maximum gradient norm for gradient clipping.
         """
         self.device = device
         self.output_dir = output_dir
         self.log_dir = log_dir
-        self.mixed_precision = mixed_precision
-        self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.max_grad_norm = max_grad_norm
         
         # Create directories if they don't exist
         os.makedirs(output_dir, exist_ok=True)
@@ -136,29 +134,15 @@ class DistillationTrainer:
             "use_attn_distillation": True,
         }
         
-        distill_config = {**default_distill_config, **(distill_config or {})}
+        distill_config = {**default_distill_config, **(config.get("distillation", {}) or {})}
         
         if loss_fn is not None:
             self.loss_fn = loss_fn
         else:
             self.loss_fn = CombinedDistillationLoss(**distill_config)
         
-        # Setup optimizer
-        if optimizer is not None:
-            self.optimizer = optimizer
-        else:
-            self.optimizer = optim.AdamW(
-                self.student_model.parameters(),
-                lr=5e-5,
-                weight_decay=0.01,
-                betas=(0.9, 0.999),
-            )
-        
-        # Setup learning rate scheduler
-        self.lr_scheduler = lr_scheduler
-        
-        # Setup gradient scaler for mixed precision training
-        self.scaler = GradScaler() if mixed_precision else None
+        # Setup training components
+        self._setup_training(config)
         
         # Setup dataloaders
         self.train_dataloader = train_dataloader
@@ -170,6 +154,82 @@ class DistillationTrainer:
         self.best_val_loss = float("inf")
         
         self.logger.info("Distillation trainer initialized successfully!")
+        
+        # Log GPU memory usage
+        if torch.cuda.is_available():
+            self.logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1024**2:.2f} MB")
+            self.logger.info(f"GPU memory reserved: {torch.cuda.memory_reserved() / 1024**2:.2f} MB")
+    
+    def _setup_training(self, config):
+        """Set up training components."""
+        # Set up optimizer
+        self.optimizer = optim.AdamW(
+            self.student_model.parameters(),
+            lr=config["training"]["learning_rate"],
+            weight_decay=config["training"]["weight_decay"]
+        )
+        
+        # Set up learning rate scheduler
+        self.scheduler = get_linear_schedule_with_warmup(
+            self.optimizer,
+            num_warmup_steps=config["training"]["warmup_steps"],
+            num_training_steps=config["training"]["total_steps"]
+        )
+        
+        # Set up mixed precision training
+        self.use_amp = config["training"].get("use_amp", False)
+        self.scaler = GradScaler() if self.use_amp else None
+        
+        # Set up gradient accumulation
+        self.gradient_accumulation_steps = config["training"].get("gradient_accumulation_steps", 1)
+        
+        # Set up gradient clipping
+        self.max_grad_norm = config["training"].get("max_grad_norm", None)
+        
+        # Set up gradient checkpointing
+        if config["training"].get("use_gradient_checkpointing", False):
+            try:
+                if hasattr(self.student_model, "gradient_checkpointing_enable"):
+                    self.student_model.gradient_checkpointing_enable()
+                    print("Gradient checkpointing enabled")
+                else:
+                    # Try to enable gradient checkpointing for transformers models
+                    for module in self.student_model.modules():
+                        if hasattr(module, "gradient_checkpointing_enable"):
+                            module.gradient_checkpointing_enable()
+                            print(f"Gradient checkpointing enabled for {type(module).__name__}")
+                    
+                    # If we couldn't find any modules with gradient checkpointing, print a warning
+                    print("Warning: Could not enable gradient checkpointing for all modules")
+            except Exception as e:
+                print(f"Warning: Failed to enable gradient checkpointing: {e}")
+        
+        # Set up torch.compile if available and enabled
+        self.use_torch_compile = config["training"].get("use_torch_compile", False)
+        if self.use_torch_compile:
+            if hasattr(torch, "compile"):
+                try:
+                    compile_mode = config["training"].get("compile_mode", "default")
+                    if compile_mode:
+                        self.student_model = torch.compile(self.student_model, mode=compile_mode)
+                    else:
+                        self.student_model = torch.compile(self.student_model)
+                    print(f"Model compiled with torch.compile (mode: {compile_mode})")
+                except Exception as e:
+                    print(f"Warning: Failed to compile model: {e}")
+                    self.use_torch_compile = False
+            else:
+                print("torch.compile not available, skipping compilation")
+                self.use_torch_compile = False
+        
+        # Set deterministic training if requested
+        if config["training"].get("deterministic", False):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+            print("Using deterministic training")
+        else:
+            torch.backends.cudnn.benchmark = True
+            print("Using cudnn benchmark for faster training")
     
     def train(self, num_epochs: int, save_every: int = 1, eval_every: int = 1):
         """
@@ -182,8 +242,6 @@ class DistillationTrainer:
         """
         self.logger.info(f"Starting training for {num_epochs} epochs...")
         self.logger.info(f"Device: {self.device}")
-        self.logger.info(f"Mixed precision: {self.mixed_precision}")
-        self.logger.info(f"Gradient accumulation steps: {self.gradient_accumulation_steps}")
         
         # Print keyboard interrupt instructions
         print("\n" + "="*80)
@@ -269,10 +327,13 @@ class DistillationTrainer:
             unit="batch"
         )
         
+        # Print instructions for graceful exit
+        print("\nPress 'q' at any time to gracefully exit training (saving a checkpoint)...")
+        
         # Training loop
         for step, batch in enumerate(progress_bar):
-            # Check for graceful exit
-            if _GRACEFUL_EXIT:
+            # Check for graceful exit (both signal handler and keyboard press)
+            if _GRACEFUL_EXIT or check_for_exit_key():
                 self.logger.info("Graceful exit requested. Saving checkpoint and exiting...")
                 self._save_checkpoint(f"epoch_{self.epoch}_interrupted.pth")
                 return {"total_loss": epoch_loss / (step + 1)}
@@ -296,7 +357,7 @@ class DistillationTrainer:
                 )
             
             # Forward pass with the student model
-            if self.mixed_precision:
+            if self.use_amp:
                 with autocast():
                     student_outputs = self.student_model(
                         pixel_values=batch["pixel_values"],
@@ -324,15 +385,16 @@ class DistillationTrainer:
                 if (step + 1) % self.gradient_accumulation_steps == 0:
                     # Gradient clipping
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.student_model.parameters(), self.max_grad_norm)
+                    if self.max_grad_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.student_model.parameters(), self.max_grad_norm)
                     
                     # Update weights
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.optimizer.zero_grad()
                     
-                    if self.lr_scheduler is not None:
-                        self.lr_scheduler.step()
+                    if self.scheduler is not None:
+                        self.scheduler.step()
             else:
                 student_outputs = self.student_model(
                     pixel_values=batch["pixel_values"],
@@ -359,14 +421,15 @@ class DistillationTrainer:
                 # Gradient accumulation
                 if (step + 1) % self.gradient_accumulation_steps == 0:
                     # Gradient clipping
-                    torch.nn.utils.clip_grad_norm_(self.student_model.parameters(), self.max_grad_norm)
+                    if self.max_grad_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(self.student_model.parameters(), self.max_grad_norm)
                     
                     # Update weights
                     self.optimizer.step()
                     self.optimizer.zero_grad()
                     
-                    if self.lr_scheduler is not None:
-                        self.lr_scheduler.step()
+                    if self.scheduler is not None:
+                        self.scheduler.step()
             
             # Update metrics
             epoch_loss += loss.item() * self.gradient_accumulation_steps
@@ -399,7 +462,7 @@ class DistillationTrainer:
             self.global_step += 1
             
             # Check for graceful exit
-            if _GRACEFUL_EXIT:
+            if _GRACEFUL_EXIT or check_for_exit_key():
                 self.logger.info("Graceful exit requested. Saving checkpoint and exiting...")
                 self._save_checkpoint(f"epoch_{self.epoch}_interrupted.pth")
                 return {"total_loss": epoch_loss / (step + 1)}
@@ -512,8 +575,8 @@ class DistillationTrainer:
             "best_val_loss": self.best_val_loss,
         }
         
-        if self.lr_scheduler is not None:
-            checkpoint["scheduler_state_dict"] = self.lr_scheduler.state_dict()
+        if self.scheduler is not None:
+            checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
         
         # Save the checkpoint
         checkpoint_path = os.path.join(self.output_dir, name)
@@ -543,8 +606,8 @@ class DistillationTrainer:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         
         # Load scheduler state if available
-        if self.lr_scheduler is not None and "scheduler_state_dict" in checkpoint:
-            self.lr_scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if self.scheduler is not None and "scheduler_state_dict" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         
         # Load training state
         self.epoch = checkpoint.get("epoch", 0)
